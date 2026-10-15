@@ -165,13 +165,14 @@ func TestCopilotFailuresAreBoundedAndSanitized(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		body string
+		want string
 	}{
-		{"failure", `printf '%s' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`},
-		{"credential in answer", `printf '%s' "$COPILOT_GITHUB_TOKEN"`},
-		{"empty", `printf '  \n'`},
-		{"stdout overflow", `while :; do printf '%0100d' 0; done`},
-		{"stderr overflow", `while :; do printf '%0100d' 0 >&2; done`},
-		{"timeout", `while :; do :; done`},
+		{"failure", `printf '%s' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`, "invocation failed"},
+		{"credential in answer", `printf '%s' "$COPILOT_GITHUB_TOKEN"`, "sensitive output"},
+		{"empty", `printf '  \n'`, "empty"},
+		{"stdout overflow", `while :; do printf '%0100d' 0; done`, "output exceeded budget"},
+		{"stderr overflow", `while :; do printf '%0100d' 0 >&2; done`, "output exceeded budget"},
+		{"timeout", `while :; do :; done`, "timed out"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			a, err := newAdvisor(config, fakeCopilot(t, tt.body), true)
@@ -181,7 +182,7 @@ func TestCopilotFailuresAreBoundedAndSanitized(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			_, err = a.invoke(ctx, config.Roles["capacity"], "capacity", region{}, peerEvidence{}, check{})
-			if err == nil || strings.Contains(err.Error(), "test-only-sentinel") {
+			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "test-only-sentinel") {
 				t.Fatalf("missing or sensitive error: %v", err)
 			}
 		})

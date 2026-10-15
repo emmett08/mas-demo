@@ -1,0 +1,154 @@
+name: MAS rollout demo
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run paid Copilot advisors after offline validation (default branch only)
+        type: boolean
+        default: false
+      scenario:
+        description: Scenario for the optional live run
+        type: choice
+        default: missing-telemetry
+        options:
+          - healthy
+          - capacity
+          - unsafe-image
+          - missing-telemetry
+
+permissions:
+  contents: read
+
+env:
+  MAS_REV: 9d9845990843f5e3464395da7bd60bb50ffb2dda
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build pinned MAS runtime
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/mas-source"
+          mkdir "$source_dir"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/emmett08/mas/tar.gz/$MAS_REV" \
+            --output "$RUNNER_TEMP/mas-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mas-source.tar.gz" -C "$source_dir" --strip-components=1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 build --release --locked \
+            --manifest-path "$source_dir/rust-protocol/Cargo.toml" --bin mas
+          echo "MAS_BIN=$source_dir/rust-protocol/target/release/mas" >> "$GITHUB_ENV"
+      - name: Validate Go and real MAS integration
+        run: |
+          set -euo pipefail
+          go -C "$GITHUB_WORKSPACE" test -race -count=1 ./...
+          go -C "$GITHUB_WORKSPACE" vet ./...
+          go -C "$GITHUB_WORKSPACE" build -o "$RUNNER_TEMP/mas-rollout-demo" .
+      - name: Run all offline scenarios and check decisions
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/mas-reports"
+          for scenario in healthy capacity unsafe-image missing-telemetry; do
+            case "$scenario" in
+              healthy) expected=proceed ;;
+              missing-telemetry) expected=inconclusive ;;
+              *) expected=hold ;;
+            esac
+            "$RUNNER_TEMP/mas-rollout-demo" -mas-bin "$MAS_BIN" \
+              -agents-config "$GITHUB_WORKSPACE/config/offline.json" \
+              -scenario "$scenario" -state-dir "$RUNNER_TEMP/mas-reports/$scenario" \
+              > "$RUNNER_TEMP/mas-reports/$scenario.json"
+            jq -e --arg expected "$expected" \
+              '.decision == $expected and .mas_usage.messages == 28 and .mas_usage.calls == 0' \
+              "$RUNNER_TEMP/mas-reports/$scenario.json"
+          done
+      - name: Upload offline reports and protocol evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mas-offline-reports
+          path: ${{ runner.temp }}/mas-reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  copilot:
+    needs: offline
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.live &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: copilot-demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install pinned Copilot CLI without live credentials
+        run: npm install --prefix "$RUNNER_TEMP/copilot-cli" --no-audit --no-fund @github/copilot@1.0.98
+      - name: Build pinned MAS and Go demo
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/mas-source"
+          mkdir "$source_dir"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/emmett08/mas/tar.gz/$MAS_REV" \
+            --output "$RUNNER_TEMP/mas-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mas-source.tar.gz" -C "$source_dir" --strip-components=1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 build --release --locked \
+            --manifest-path "$source_dir/rust-protocol/Cargo.toml" --bin mas
+          echo "MAS_BIN=$source_dir/rust-protocol/target/release/mas" >> "$GITHUB_ENV"
+          go -C "$GITHUB_WORKSPACE" build -o "$RUNNER_TEMP/mas-rollout-demo" .
+      - name: Run explicitly authorized Copilot advisors
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          DEMO_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          test -n "$COPILOT_GITHUB_TOKEN" || { echo "Configure the copilot-demo environment credential"; exit 1; }
+          mkdir "$RUNNER_TEMP/mas-live-reports"
+          "$RUNNER_TEMP/mas-rollout-demo" -mas-bin "$MAS_BIN" \
+            -copilot-bin "$RUNNER_TEMP/copilot-cli/node_modules/.bin/copilot" \
+            -agents-config "$GITHUB_WORKSPACE/config/copilot.json" -allow-live \
+            -timeout 120s -scenario "$DEMO_SCENARIO" \
+            -state-dir "$RUNNER_TEMP/mas-live-reports/state" \
+            > "$RUNNER_TEMP/mas-live-reports/report.json"
+          case "$DEMO_SCENARIO" in
+            healthy) expected=proceed ;;
+            missing-telemetry) expected=inconclusive ;;
+            *) expected=hold ;;
+          esac
+          jq -e --arg expected "$expected" \
+            '.decision == $expected and .mas_usage.messages == 28 and .mas_usage.calls == 6' \
+            "$RUNNER_TEMP/mas-live-reports/report.json"
+      - name: Upload live report and MAS evidence (never Copilot homes or logs)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mas-copilot-report
+          path: ${{ runner.temp }}/mas-live-reports/
+          if-no-files-found: warn
+          retention-days: 3

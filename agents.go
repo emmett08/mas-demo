@@ -130,7 +130,7 @@ func newAdvisor(config *executionConfig, binary string, allowLive bool) (*adviso
 
 // boundedOutput cancels the process on overflow without retaining unbounded output.
 type boundedOutput struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
 	overflow bool
 	cancel   context.CancelFunc
@@ -138,14 +138,14 @@ type boundedOutput struct {
 
 func (b *boundedOutput) Write(p []byte) (int, error) {
 	size := len(p)
-	remaining := b.limit - b.Len()
+	remaining := b.limit - b.buffer.Len()
 	if size > remaining {
-		b.Buffer.Write(p[:remaining])
+		b.buffer.Write(p[:remaining])
 		b.overflow = true
 		b.cancel()
 		return size, nil
 	}
-	b.Buffer.Write(p)
+	b.buffer.Write(p)
 	return size, nil
 }
 
@@ -199,7 +199,7 @@ func (a *advisor) invoke(ctx context.Context, agent agentConfig, role string, r 
 	case err != nil:
 		return "", fmt.Errorf("Copilot invocation failed")
 	}
-	text := strings.TrimSpace(stdout.String())
+	text := strings.TrimSpace(stdout.buffer.String())
 	if text == "" || !utf8.ValidString(text) || strings.Contains(text, a.token) {
 		return "", fmt.Errorf("Copilot returned empty, invalid, or sensitive output")
 	}

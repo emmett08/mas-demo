@@ -10,7 +10,8 @@ cannot be voted away by other successful checks.
 The application is Go, with no third-party Go dependencies. MAS is a **Rust
 runtime**, not a Go library: this demo drives its real administrative CLI and
 SQLite mailboxes. It does not reimplement the MAS protocol or use a fake bus.
-No Kubernetes cluster, API keys, Python, LLMs, or paid services are needed.
+The default offline mode needs no Kubernetes cluster, API keys, Python, LLMs,
+or paid services. Optional Copilot CLI advisors are described below.
 
 ## Run
 
@@ -104,7 +105,8 @@ benchmark.
 Each region uses seven tasks: one delegation, three specialist checks, and three
 peer checks. Across two regions that is **14 tasks / 28 messages**, bounded by
 100 messages, 256 KiB of cumulative wire data, mailbox capacity 8, and a 120-second
-MAS deadline. Pure fixture computations do not reserve external calls.
+MAS deadline. Pure fixture computations do not reserve external calls. Copilot
+mode reserves up to six calls and adds advisory text to the same MAS results.
 
 For each exchange, Go asks MAS to encode the envelope, sends it, receives and
 validates the exact delivery, checks request actionability, acknowledges receipt,
@@ -155,7 +157,7 @@ envelope matching, and cancelled-request rejection.
 
 ## Safety and scope
 
-All agents are deterministic Go functions under **one trusted host identity**,
+In default offline mode, all agents are deterministic Go functions under **one trusted host identity**,
 using synthetic observations. No manifests are applied, no cluster is queried,
 and no image signature is actually verified. This demonstrates orchestration and
 evidence flow, not production deployment approval or AI reasoning.
@@ -168,3 +170,120 @@ operation-specific validation, durable scheduling/recovery, and explicit human
 approval plus idempotency/reconciliation for any external effects. Receipt,
 task completion, and peer agreement do not establish truth or exactly-once
 deployment.
+
+## Optional Copilot advisors
+
+No changes to the upstream MAS repository are required. This demo integrates
+**Copilot CLI sessions**, not GitHub Copilot cloud coding agents or repository
+custom-agent definitions. The Go coordinator and peer-policy checks remain
+deterministic; configured specialist roles can additionally request a model's
+interpretation of their delivered evidence.
+
+Two checked-in configurations map the `capacity`, `reliability`, and `security`
+roles to providers:
+
+- `config/offline.json`: deterministic providers; no CLI, credentials, or calls.
+- `config/copilot.json`: Copilot providers with explicit models, role
+  instructions, per-call timeouts, AI-credit caps, and shared invocation/output
+  budgets. A role may be changed to `deterministic` with an empty model and zero
+  AI credits to run a mixed-provider demo.
+
+Configuration is optional; omitting it preserves the original offline behavior.
+The generated `topology.json` still defines the hybrid communication graph;
+provider configuration does not grant routes or tool permissions.
+
+```sh
+go -C "$DEMO_DIR" run . -mas-bin "$MAS_BIN" \
+  -agents-config "$DEMO_DIR/config/offline.json"
+
+# Additional live prerequisite: Node.js 22+ and the pinned CLI.
+# Install before exporting credentials.
+npm install --prefix /tmp/mas-copilot-cli --no-audit --no-fund @github/copilot@1.0.98
+
+# Supply COPILOT_GITHUB_TOKEN securely through your environment/secret manager.
+# Do not put its value in JSON, command-line arguments, or tracked files.
+go -C "$DEMO_DIR" run . -mas-bin "$MAS_BIN" \
+  -copilot-bin /tmp/mas-copilot-cli/node_modules/.bin/copilot \
+  -agents-config "$DEMO_DIR/config/copilot.json" -allow-live \
+  -timeout 120s -scenario missing-telemetry
+```
+
+Use an account with Copilot access and a supported credential, such as a
+fine-grained PAT with **Copilot Requests** permission. Classic PATs are not
+supported by this CLI. The workflow's automatic `GITHUB_TOKEN` is **not** a
+substitute for Copilot authorization. Model access depends on the account and
+organization policies; change the configured model if `gpt-5.4` is unavailable.
+See the [Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference).
+
+### Execution and safety contract
+
+- Both a Copilot provider in configuration **and** `-allow-live` are required.
+  Only the named `COPILOT_GITHUB_TOKEN` environment variable is accepted; there
+  is no fallback to ambient login or `GITHUB_TOKEN`. All three roles must be
+  explicitly configured, and unknown fields/providers are rejected.
+- Every specialist computes its authoritative `state` and `evidence` first.
+  Copilot receives those plus the synthetic region and peer evidence. Its answer
+  is stored only in `advice`, sent back inside the correlated MAS result, and
+  never parsed as a decision, instruction, or command. It cannot convert
+  `blocked` or `unknown` into `ready`. Even advice saying “proceed” leaves missing
+  telemetry **inconclusive**.
+- A fresh, private, temporary working directory and home are created for each
+  invocation and removed afterward. The child receives only an allowlisted
+  environment, not repository credentials, provider overrides, `NODE_OPTIONS`,
+  or inherited Copilot configuration. CLI flags restrict available tools, deny
+  tool permissions, disable built-in MCPs, custom instructions, remote export,
+  shell startup files, and auto-updates. No repository is attached.
+  These controls depend on the pinned CLI; they are **not an OS sandbox or
+  containment guarantee**. Run live mode only on a trusted host, preferably an
+  ephemeral runner.
+- At most six invocations are allowed per run; a reservation is committed in
+  MAS **before** launching each CLI session. Configuration must budget two calls
+  per live role (one per region). Each invocation allows at most 15 seconds.
+  The supplied config caps each response at 1,024 UTF-8 bytes; configuration
+  permits at most 2,048. Overflow cancels the process; stderr is separately
+  bounded and never copied to reports/errors.
+- `max_ai_credits` is forwarded to the pinned CLI. Its minimum is 30 credits,
+  and it is a **soft per-session cap**, not a hard spending limit: a response
+  can overshoot before usage is observed. Six CLI invocations do not prove
+  exactly six underlying model requests. Local timeouts and MAS reservations
+  do not establish actual provider charges or cancel remote execution.
+- Missing credentials, denied models, CLI errors, empty/invalid output,
+  detected credential echo, timeout, or output overflow stop the run without a
+  readiness report. Available MAS call evidence is recorded as
+  `outcome_unknown`, with no automatic retries. If the overall deadline prevents
+  recording, the durable reservation remains for inspection.
+
+Deterministic mode still emits 28 messages and zero external calls. The supplied
+live config emits 28 messages and records six calls; reports include untrusted
+model-authored `advice`. Do not execute or treat that text as independently
+verified evidence. Real model execution requires your own authorized credential;
+the automated test suite uses local subprocess fixtures for the provider while
+keeping the MAS runtime real.
+
+## GitHub Actions demo
+
+`.github/workflows/demo.yml` provides:
+
+1. **Offline validation on push, pull request, or manual dispatch:** builds the
+   pinned MAS revision with Rust 1.99.0, runs Go tests with race detection against
+   real MAS, vets/builds Go, exercises all four configured offline scenarios, and
+   checks their decisions and protocol usage. It uploads JSON reports and MAS
+   evidence for seven days. No Copilot credential is passed to this job.
+2. **Optional live job:** runs only after offline success, on manual dispatch
+   with `live=true`, and only from the repository's default branch. It runs the
+   selected scenario with the pinned Copilot CLI and uploads the report and MAS
+   evidence for three days. Temporary Copilot homes, credentials, and raw CLI
+   logs are never selected for upload.
+
+Before using live mode, create the **`copilot-demo` GitHub environment**, restrict
+it to the default branch, configure required reviewers as appropriate, and add
+its **`COPILOT_GITHUB_TOKEN` environment secret**. Then select **Actions → MAS
+rollout demo → Run workflow**, choose the default branch, enable `live`, and
+select a scenario. Environment protection requires repository-admin setup; YAML
+cannot create those approval rules. Live execution may incur Copilot charges.
+
+Actions are pinned by commit, checkout credentials are not persisted, and the
+workflow token has only `contents: read`. The Copilot secret is exposed only to
+the live invocation step, not package installation/build steps or PR runs. Never
+change this to execute untrusted PR code with the live credential. Review
+configuration and workflow changes before merging them to the default branch.
