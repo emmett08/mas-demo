@@ -49,7 +49,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (action runtime: Node 24)
         with:
           node-version: '22'
           package-manager-cache: false
@@ -127,7 +127,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (action runtime: Node 24)
         with:
           node-version: '22'
           package-manager-cache: false

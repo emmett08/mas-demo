@@ -300,6 +300,14 @@ If the live job fails, use its diagnostic code:
 | `access_denied` | Check the account's Copilot subscription and organisation policies. |
 | `cli_arguments` / `process_start` | Check the pinned CLI installation, executable, Node.js and invocation. |
 | `process_failed` | The error was not recognised; check model availability and account access. Raw output remains private. |
+| `output_budget_exceeded` | The stdout or stderr limit was exceeded; partial output was discarded. |
+| `invocation_timeout` / `invocation_cancelled` | The deadline expired or the invocation was cancelled; completion remains unknown. |
+| `invalid_output` | The answer was empty, invalid UTF-8 or contained the credential, so it was discarded. |
+
+Local output rejection, timeouts and cancellation also carry structured failure
+codes. Their `exit_code: -1` means no provider exit status applies; it is not a
+CLI exit code. Evidence is recorded when the MAS bus context remains active;
+if the overall run is cancelled, the durable reservation may remain unfinished.
 
 See [GitHub's authentication troubleshooting guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/troubleshoot-copilot-cli-auth).
 After correcting a credential, rerun the failed job. After merging a code or

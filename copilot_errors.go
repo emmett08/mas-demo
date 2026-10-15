@@ -12,7 +12,7 @@ import (
 // Subprocess output is untrusted and must never be retained in this error.
 type copilotFailure struct {
 	Code     string
-	ExitCode int // -1 means no normal process exit status is available.
+	ExitCode int // -1 means no provider exit status applies (local rejection) or is available.
 }
 
 func (e *copilotFailure) Error() string {
@@ -32,6 +32,14 @@ func (e *copilotFailure) Error() string {
 		hint = "the pinned CLI rejected an argument; check CLI version and invocation compatibility"
 	case "process_start":
 		hint = "the CLI could not start; check its executable, Node.js, and PATH"
+	case "output_budget_exceeded":
+		hint = "Copilot output exceeded budget; partial output was discarded"
+	case "invocation_timeout":
+		hint = "Copilot invocation timed out; completion is unknown"
+	case "invocation_cancelled":
+		hint = "Copilot invocation was cancelled; completion is unknown"
+	case "invalid_output":
+		hint = "Copilot returned empty, invalid, or sensitive output; the answer was discarded"
 	}
 	return fmt.Sprintf("Copilot invocation failed [%s, exit_code=%d]: %s", e.Code, e.ExitCode, hint)
 }
