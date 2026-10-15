@@ -11,7 +11,7 @@ import (
 )
 
 // MAS_BIN opts into tests against the actual native runtime, never a substitute bus.
-func testBus(t *testing.T) *bus {
+func testBus(t *testing.T, callBudget ...int) *bus {
 	t.Helper()
 	binary := os.Getenv("MAS_BIN")
 	if binary == "" {
@@ -22,7 +22,11 @@ func testBus(t *testing.T) *bus {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	data, err := json.Marshal(rolloutTopology())
+	topology := rolloutTopology()
+	if len(callBudget) > 0 {
+		topology.MaxCalls = callBudget[0]
+	}
+	data, err := json.Marshal(topology)
 	if err != nil {
 		t.Fatal(err)
 	}

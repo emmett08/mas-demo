@@ -24,6 +24,9 @@ func run() error {
 	name := flag.String("scenario", "healthy", "healthy, capacity, unsafe-image, or missing-telemetry")
 	directory := flag.String("state-dir", "", "new private directory for retained evidence (default: temporary directory)")
 	timeout := flag.Duration("timeout", 30*time.Second, "total workflow time limit (maximum 2m)")
+	agentsPath := flag.String("agents-config", "", "role/provider JSON configuration (default: deterministic)")
+	copilotBinary := flag.String("copilot-bin", "copilot", "path to Copilot CLI 1.0.98")
+	allowLive := flag.Bool("allow-live", false, "explicitly permit configured Copilot calls")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
@@ -32,6 +35,17 @@ func run() error {
 		return fmt.Errorf("timeout must be positive and no greater than 2m")
 	}
 	regions, err := scenario(*name)
+	if err != nil {
+		return err
+	}
+	var agents *executionConfig
+	if *agentsPath != "" {
+		agents, err = loadExecutionConfig(*agentsPath)
+		if err != nil {
+			return err
+		}
+	}
+	advice, err := newAdvisor(agents, *copilotBinary, *allowLive)
 	if err != nil {
 		return err
 	}
@@ -52,7 +66,11 @@ func run() error {
 		return fmt.Errorf("create fresh state directory: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "Retained MAS evidence:", dir)
-	config, err := json.MarshalIndent(rolloutTopology(), "", "  ")
+	topology := rolloutTopology()
+	if agents != nil && agents.MaxCalls > 0 {
+		topology.MaxCalls = agents.MaxCalls
+	}
+	config, err := json.MarshalIndent(topology, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -64,7 +82,7 @@ func run() error {
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
-	b := &bus{ctx: ctx, binary: resolved, database: filepath.Join(dir, "state.sqlite")}
+	b := &bus{ctx: ctx, binary: resolved, database: filepath.Join(dir, "state.sqlite"), advisor: advice}
 	if err := b.command(nil, nil, "init", b.database, "rollout", configPath); err != nil {
 		return err
 	}

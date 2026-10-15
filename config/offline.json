@@ -1,0 +1,28 @@
+{
+  "credential_env": "COPILOT_GITHUB_TOKEN",
+  "max_calls": 0,
+  "max_output_bytes": 1024,
+  "roles": {
+    "capacity": {
+      "provider": "deterministic",
+      "model": "",
+      "instructions": "Review rollout headroom and surge capacity.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 0
+    },
+    "reliability": {
+      "provider": "deterministic",
+      "model": "",
+      "instructions": "Review error budget and missing telemetry.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 0
+    },
+    "security": {
+      "provider": "deterministic",
+      "model": "",
+      "instructions": "Review image policy and workload privilege.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 0
+    }
+  }
+}

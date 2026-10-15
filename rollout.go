@@ -22,6 +22,7 @@ type check struct {
 	Role     string `json:"role"`
 	State    string `json:"state"`
 	Evidence string `json:"evidence"`
+	Advice   string `json:"advice,omitempty"`
 }
 
 type regionalReport struct {
@@ -202,7 +203,11 @@ func assessRegion(b *bus, r region) (regionalReport, error) {
 		if err != nil {
 			return result, err
 		}
-		raw, err := b.finish(request, evaluate(roles[i], input, peer))
+		verdict := evaluate(roles[i], input, peer)
+		if err := b.advisor.advise(b, roles[i], input, peer, &verdict); err != nil {
+			return result, err
+		}
+		raw, err := b.finish(request, verdict)
 		if err != nil {
 			return result, err
 		}

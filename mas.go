@@ -17,6 +17,7 @@ type bus struct {
 	binary   string
 	database string
 	next     int
+	advisor  *advisor
 }
 
 type message struct {
