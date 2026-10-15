@@ -1,0 +1,117 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"time"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "rollout demo:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	binary := flag.String("mas-bin", "mas", "path to the native MAS administrative CLI")
+	name := flag.String("scenario", "healthy", "healthy, capacity, unsafe-image, or missing-telemetry")
+	directory := flag.String("state-dir", "", "new private directory for retained evidence (default: temporary directory)")
+	timeout := flag.Duration("timeout", 30*time.Second, "total workflow time limit (maximum 2m)")
+	agentsPath := flag.String("agents-config", "", "role/provider JSON configuration (default: deterministic)")
+	copilotBinary := flag.String("copilot-bin", "copilot", "path to Copilot CLI 1.0.98")
+	allowLive := flag.Bool("allow-live", false, "explicitly permit configured Copilot calls")
+	kubeContext := flag.String("kube-context", "", "explicit context for read-only single-node Kubernetes demo observations")
+	kubectlBinary := flag.String("kubectl-bin", "kubectl", "path to kubectl")
+	clusterDesired := flag.Int("cluster-desired", 3, "proposed replicas per sample deployment in cluster mode")
+	flag.Parse()
+	if flag.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	if *timeout <= 0 || *timeout > 2*time.Minute {
+		return fmt.Errorf("timeout must be positive and no greater than 2m")
+	}
+	regions, err := scenario(*name)
+	if err != nil {
+		return err
+	}
+	var agents *executionConfig
+	if *agentsPath != "" {
+		agents, err = loadExecutionConfig(*agentsPath)
+		if err != nil {
+			return err
+		}
+	}
+	advice, err := newAdvisor(agents, *copilotBinary, *allowLive)
+	if err != nil {
+		return err
+	}
+	resolved, err := exec.LookPath(*binary)
+	if err != nil {
+		return fmt.Errorf("MAS CLI not found; build emmett08/mas and supply -mas-bin: %w", err)
+	}
+	var dir string
+	if *directory == "" {
+		dir, err = os.MkdirTemp("", "mas-rollout-")
+	} else {
+		dir, err = filepath.Abs(*directory)
+		if err == nil {
+			err = os.Mkdir(dir, 0700)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("create fresh state directory: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Retained MAS evidence:", dir)
+	topology := rolloutTopology()
+	if agents != nil && agents.MaxCalls > 0 {
+		topology.MaxCalls = agents.MaxCalls
+	}
+	config, err := json.MarshalIndent(topology, "", "  ")
+	if err != nil {
+		return err
+	}
+	configPath := filepath.Join(dir, "topology.json")
+	if err := os.WriteFile(configPath, config, 0600); err != nil {
+		return err
+	}
+	parent, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(parent, *timeout)
+	defer cancel()
+	if *kubeContext != "" {
+		regions, err = observeCluster(ctx, *kubectlBinary, *kubeContext, *name, *clusterDesired)
+		if err != nil {
+			return err
+		}
+		observations, err := json.MarshalIndent(regions, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cluster-observations.json"), observations, 0600); err != nil {
+			return err
+		}
+	}
+	b := &bus{ctx: ctx, binary: resolved, database: filepath.Join(dir, "state.sqlite"), advisor: advice}
+	b.trace, err = openTrace(dir)
+	if err != nil {
+		return err
+	}
+	defer b.trace.close()
+	if err := b.command(nil, nil, "init", b.database, "rollout", configPath); err != nil {
+		return err
+	}
+	result, err := runRollout(b, *name, regions)
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(result)
+}

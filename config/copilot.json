@@ -1,0 +1,28 @@
+{
+  "credential_env": "COPILOT_GITHUB_TOKEN",
+  "max_calls": 6,
+  "max_output_bytes": 1024,
+  "roles": {
+    "capacity": {
+      "provider": "copilot",
+      "model": "gpt-5.4",
+      "instructions": "Explain rollout headroom and suggest a safe response to insufficient capacity.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 30
+    },
+    "reliability": {
+      "provider": "copilot",
+      "model": "gpt-5.4",
+      "instructions": "Explain the error budget and missing telemetry; never infer absent evidence.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 30
+    },
+    "security": {
+      "provider": "copilot",
+      "model": "gpt-5.4",
+      "instructions": "Explain image and privilege policy violations; do not claim signatures were verified.",
+      "timeout_seconds": 15,
+      "max_ai_credits": 30
+    }
+  }
+}

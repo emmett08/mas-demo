@@ -1,0 +1,304 @@
+name: MAS rollout demo
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run paid Copilot advisors after offline validation (default branch only)
+        type: boolean
+        default: false
+      kubernetes:
+        description: Run ephemeral k3s integration with real workload observations
+        type: boolean
+        default: false
+      deploy:
+        description: Explicitly authorize the healthy sample scale-up (requires kubernetes; default branch only)
+        type: boolean
+        default: false
+      scenario:
+        description: Scenario for the optional live run
+        type: choice
+        default: missing-telemetry
+        options:
+          - healthy
+          - capacity
+          - unsafe-image
+          - missing-telemetry
+
+permissions:
+  contents: read
+
+env:
+  MAS_REV: 9d9845990843f5e3464395da7bd60bb50ffb2dda
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (Node 24)
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build pinned MAS runtime
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/mas-source"
+          mkdir "$source_dir"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/emmett08/mas/tar.gz/$MAS_REV" \
+            --output "$RUNNER_TEMP/mas-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mas-source.tar.gz" -C "$source_dir" --strip-components=1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 build --release --locked \
+            --manifest-path "$source_dir/rust-protocol/Cargo.toml" --bin mas
+          echo "MAS_BIN=$source_dir/rust-protocol/target/release/mas" >> "$GITHUB_ENV"
+      - name: Validate Go and real MAS integration
+        run: |
+          set -euo pipefail
+          go -C "$GITHUB_WORKSPACE" test -race -count=1 ./...
+          go -C "$GITHUB_WORKSPACE" vet ./...
+          go -C "$GITHUB_WORKSPACE" build -o "$RUNNER_TEMP/mas-rollout-demo" .
+      - name: Run all offline scenarios and check decisions
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/mas-reports"
+          for scenario in healthy capacity unsafe-image missing-telemetry; do
+            case "$scenario" in
+              healthy) expected=proceed ;;
+              missing-telemetry) expected=inconclusive ;;
+              *) expected=hold ;;
+            esac
+            "$RUNNER_TEMP/mas-rollout-demo" -mas-bin "$MAS_BIN" \
+              -agents-config "$GITHUB_WORKSPACE/config/offline.json" \
+              -scenario "$scenario" -state-dir "$RUNNER_TEMP/mas-reports/$scenario" \
+              > "$RUNNER_TEMP/mas-reports/$scenario.json"
+            jq -e --arg expected "$expected" \
+              '.decision == $expected and .mas_usage.messages == 28 and .mas_usage.calls == 0' \
+              "$RUNNER_TEMP/mas-reports/$scenario.json"
+          done
+      - name: Publish offline mailbox timelines
+        if: always()
+        run: |
+          shopt -s nullglob
+          for summary in "$RUNNER_TEMP"/mas-reports/*/mailbox.md; do
+            printf '\n## %s\n' "$(basename "$(dirname "$summary")")" >> "$GITHUB_STEP_SUMMARY"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Upload offline reports and protocol evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: mas-offline-reports
+          path: ${{ runner.temp }}/mas-reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  copilot:
+    needs: offline
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.live &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: copilot-demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (Node 24)
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install pinned Copilot CLI without live credentials
+        run: npm install --prefix "$RUNNER_TEMP/copilot-cli" --no-audit --no-fund @github/copilot@1.0.98
+      - name: Build pinned MAS and Go demo
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/mas-source"
+          mkdir "$source_dir"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/emmett08/mas/tar.gz/$MAS_REV" \
+            --output "$RUNNER_TEMP/mas-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mas-source.tar.gz" -C "$source_dir" --strip-components=1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 build --release --locked \
+            --manifest-path "$source_dir/rust-protocol/Cargo.toml" --bin mas
+          echo "MAS_BIN=$source_dir/rust-protocol/target/release/mas" >> "$GITHUB_ENV"
+          go -C "$GITHUB_WORKSPACE" build -o "$RUNNER_TEMP/mas-rollout-demo" .
+      - name: Run explicitly authorized Copilot advisors
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          DEMO_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          test -n "$COPILOT_GITHUB_TOKEN" || { echo "Configure the copilot-demo environment credential"; exit 1; }
+          mkdir "$RUNNER_TEMP/mas-live-reports"
+          "$RUNNER_TEMP/mas-rollout-demo" -mas-bin "$MAS_BIN" \
+            -copilot-bin "$RUNNER_TEMP/copilot-cli/node_modules/.bin/copilot" \
+            -agents-config "$GITHUB_WORKSPACE/config/copilot.json" -allow-live \
+            -timeout 120s -scenario "$DEMO_SCENARIO" \
+            -state-dir "$RUNNER_TEMP/mas-live-reports/state" \
+            > "$RUNNER_TEMP/mas-live-reports/report.json"
+          case "$DEMO_SCENARIO" in
+            healthy) expected=proceed ;;
+            missing-telemetry) expected=inconclusive ;;
+            *) expected=hold ;;
+          esac
+          jq -e --arg expected "$expected" \
+            '.decision == $expected and .mas_usage.messages == 28 and .mas_usage.calls == 6' \
+            "$RUNNER_TEMP/mas-live-reports/report.json"
+      - name: Publish live mailbox timeline
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/mas-live-reports/state/mailbox.md"; then
+            cat "$RUNNER_TEMP/mas-live-reports/state/mailbox.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload live report and MAS evidence (never Copilot homes or logs)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: mas-copilot-report
+          path: ${{ runner.temp }}/mas-live-reports/
+          if-no-files-found: warn
+          retention-days: 3
+
+  kubernetes:
+    needs: offline
+    if: github.event_name == 'workflow_dispatch' && inputs.kubernetes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (Node 24)
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install pinned cluster tools and build MAS
+        run: |
+          set -euo pipefail
+          echo "KUBECONFIG=$RUNNER_TEMP/mas-kubeconfig" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/mas-kubernetes-reports"
+          curl --fail --location --retry 3 \
+            https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 \
+            --output "$RUNNER_TEMP/bin/k3d"
+          echo "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  $RUNNER_TEMP/bin/k3d" | sha256sum --check --strict -
+          curl --fail --location --retry 3 \
+            https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl \
+            --output "$RUNNER_TEMP/bin/kubectl"
+          checksum=$(curl --fail --location --retry 3 https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl.sha256)
+          echo "$checksum  $RUNNER_TEMP/bin/kubectl" | sha256sum --check --strict -
+          chmod +x "$RUNNER_TEMP/bin/k3d" "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          source_dir="$RUNNER_TEMP/mas-source"
+          mkdir "$source_dir"
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/emmett08/mas/tar.gz/$MAS_REV" \
+            --output "$RUNNER_TEMP/mas-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mas-source.tar.gz" -C "$source_dir" --strip-components=1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 build --release --locked \
+            --manifest-path "$source_dir/rust-protocol/Cargo.toml" --bin mas
+          echo "MAS_BIN=$source_dir/rust-protocol/target/release/mas" >> "$GITHUB_ENV"
+          go -C "$GITHUB_WORKSPACE" build -o "$RUNNER_TEMP/mas-rollout-demo" .
+      - name: Provision isolated disposable cluster and baseline workloads
+        run: |
+          set -euo pipefail
+          k3d cluster create mas-demo --image rancher/k3s:v1.37.1-k3s1 \
+            --servers 1 --agents 0 \
+            --k3s-arg '--disable=traefik@server:0' \
+            --k3s-arg '--disable=servicelb@server:0' \
+            --kubeconfig-update-default=false --kubeconfig-switch-context=false \
+            --wait --timeout 180s
+          k3d kubeconfig get mas-demo > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+          kubectl --context k3d-mas-demo wait --for=condition=Ready nodes --all --timeout=120s
+          for region in east west; do
+            kubectl --context k3d-mas-demo create namespace "mas-$region"
+            kubectl --context k3d-mas-demo -n "mas-$region" apply -f "$GITHUB_WORKSPACE/k8s/sample.yaml"
+            kubectl --context k3d-mas-demo -n "mas-$region" rollout status deployment/sample --timeout=120s
+          done
+      - name: Assess healthy and deliberately blocked proposals without mutating workloads
+        run: |
+          set -euo pipefail
+          for scenario in healthy capacity; do
+            "$RUNNER_TEMP/mas-rollout-demo" -mas-bin "$MAS_BIN" \
+              -agents-config "$GITHUB_WORKSPACE/config/offline.json" \
+              -kube-context k3d-mas-demo -cluster-desired 3 -timeout 120s \
+              -scenario "$scenario" -state-dir "$RUNNER_TEMP/mas-kubernetes-reports/$scenario" \
+              > "$RUNNER_TEMP/mas-kubernetes-reports/$scenario.json"
+          done
+          jq -e '.decision == "proceed" and all(.regions[]; .cluster.rollout_complete)' "$RUNNER_TEMP/mas-kubernetes-reports/healthy.json"
+          jq -e '.decision == "hold" and all(.regions[]; .state == "blocked")' "$RUNNER_TEMP/mas-kubernetes-reports/capacity.json"
+          for region in east west; do
+            kubectl --context k3d-mas-demo -n "mas-$region" get deployment sample -o json \
+              > "$RUNNER_TEMP/mas-kubernetes-reports/$region-before.json"
+            jq -e '.spec.replicas == 2 and .status.readyReplicas == 2' "$RUNNER_TEMP/mas-kubernetes-reports/$region-before.json"
+          done
+      - name: Explicitly authorized healthy rollout (never the blocked proposal)
+        if: >-
+          inputs.deploy &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -euo pipefail
+          jq -e '.decision == "proceed" and all(.regions[]; .cluster.rollout_complete and .state == "ready")' "$RUNNER_TEMP/mas-kubernetes-reports/healthy.json"
+          jq -e '.decision == "hold"' "$RUNNER_TEMP/mas-kubernetes-reports/capacity.json"
+          for region in east west; do
+            kubectl --context k3d-mas-demo -n "mas-$region" scale deployment/sample --current-replicas=2 --replicas=3
+            kubectl --context k3d-mas-demo -n "mas-$region" rollout status deployment/sample --timeout=120s \
+              | tee "$RUNNER_TEMP/mas-kubernetes-reports/$region-rollout.txt"
+            kubectl --context k3d-mas-demo -n "mas-$region" get deployment sample -o json \
+              > "$RUNNER_TEMP/mas-kubernetes-reports/$region-after.json"
+            jq -e '.spec.replicas == 3 and .status.readyReplicas == 3 and .status.updatedReplicas == 3 and .status.availableReplicas == 3' "$RUNNER_TEMP/mas-kubernetes-reports/$region-after.json"
+          done
+          echo 'Healthy sample scaled from 2 to 3 replicas per namespace; blocked proposal was never applied.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect cluster diagnostics and publish mailbox timelines
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/mas-kubernetes-reports/diagnostics"
+          for resource in nodes pods deployments events; do
+            kubectl --context k3d-mas-demo --request-timeout=10s get "$resource" --all-namespaces -o json \
+              > "$RUNNER_TEMP/mas-kubernetes-reports/diagnostics/$resource.json" 2>/dev/null || true
+          done
+          echo '## Kubernetes readiness (single disposable node, two logical regions)' >> "$GITHUB_STEP_SUMMARY"
+          echo 'CPU/memory requests and replica readiness are observed. Error budget and image attestation remain explicitly synthetic. This is not production deployment approval.' >> "$GITHUB_STEP_SUMMARY"
+          shopt -s nullglob
+          for report in "$RUNNER_TEMP"/mas-kubernetes-reports/{healthy,capacity}.json; do
+            if jq -e '.decision' "$report" >/dev/null 2>&1; then
+              jq -r '"- " + .scenario + ": **" + .decision + "**"' "$report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          for summary in "$RUNNER_TEMP"/mas-kubernetes-reports/*/mailbox.md; do
+            printf '\n### %s\n' "$(basename "$(dirname "$summary")")" >> "$GITHUB_STEP_SUMMARY"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Delete disposable cluster
+        if: always()
+        run: |
+          if command -v k3d >/dev/null; then
+            k3d cluster delete mas-demo
+          fi
+          rm -f "$KUBECONFIG"
+      - name: Upload cluster reports, JSONL history, and diagnostics (no kubeconfig)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: mas-kubernetes-reports
+          path: ${{ runner.temp }}/mas-kubernetes-reports/
+          if-no-files-found: warn
+          retention-days: 7
