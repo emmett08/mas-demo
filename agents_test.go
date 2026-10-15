@@ -250,7 +250,8 @@ func TestMASRecordsProviderFailureWithoutReadinessDecision(t *testing.T) {
 	t.Setenv("COPILOT_GITHUB_TOKEN", "test-only-sentinel")
 	b := testBus(t, 6)
 	var err error
-	b.advisor, err = newAdvisor(sampleConfig(t, "copilot"), fakeCopilot(t, "exit 1"), true)
+	b.advisor, err = newAdvisor(sampleConfig(t, "copilot"), fakeCopilot(t,
+		`printf '%s\n' 'Error: No authentication information found' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,11 +260,16 @@ func TestMASRecordsProviderFailureWithoutReadinessDecision(t *testing.T) {
 	if err == nil || got.Decision != "" {
 		t.Fatalf("provider failure produced decision: %+v %v", got, err)
 	}
+	if !strings.Contains(err.Error(), "advisor east-capacity:") || strings.Contains(err.Error(), "test-only-sentinel") {
+		t.Fatalf("provider failure lacks safe actor context: %v", err)
+	}
 	var status struct {
 		Calls []struct {
 			State    string `json:"state"`
 			Evidence struct {
-				Status string `json:"status"`
+				Status      string `json:"status"`
+				FailureCode string `json:"failure_code"`
+				ExitCode    int    `json:"exit_code"`
 			} `json:"evidence"`
 		} `json:"calls"`
 	}
@@ -272,5 +278,8 @@ func TestMASRecordsProviderFailureWithoutReadinessDecision(t *testing.T) {
 	}
 	if len(status.Calls) != 1 || status.Calls[0].State != "recorded" || status.Calls[0].Evidence.Status != "outcome_unknown" {
 		t.Fatalf("provider failure lacks durable evidence: %+v", status)
+	}
+	if status.Calls[0].Evidence.FailureCode != "authentication_missing" || status.Calls[0].Evidence.ExitCode != 1 {
+		t.Fatalf("provider failure lacks safe diagnostics: %+v", status)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -189,15 +190,15 @@ func (a *advisor) invoke(ctx context.Context, agent agentConfig, role string, r 
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = time.Second
 	err = cmd.Run()
-	// Never include subprocess diagnostics or partial output in an error: these
-	// can contain credentials or untrusted model text.
+	// Raw diagnostics and partial output may contain credentials or model text.
+	// Expose only a fixed diagnostic code/hint and the process exit status.
 	switch {
 	case stdout.overflow || stderr.overflow:
 		return "", fmt.Errorf("Copilot output exceeded budget")
 	case ctx.Err() != nil:
 		return "", fmt.Errorf("Copilot invocation timed out or was cancelled")
 	case err != nil:
-		return "", fmt.Errorf("Copilot invocation failed")
+		return "", classifyCopilotFailure(err, stderr.buffer.String())
 	}
 	text := strings.TrimSpace(stdout.buffer.String())
 	if text == "" || !utf8.ValidString(text) || strings.Contains(text, a.token) {
@@ -226,12 +227,17 @@ func (a *advisor) advise(b *bus, role string, r region, peer peerEvidence, verdi
 	}
 	if invokeErr != nil {
 		evidence["status"] = "outcome_unknown"
+		var failure *copilotFailure
+		if errors.As(invokeErr, &failure) {
+			evidence["failure_code"] = failure.Code
+			evidence["exit_code"] = failure.ExitCode
+		}
 	}
 	if err := b.command(evidence, nil, "finish", b.database, "rollout", actor, callID, "-"); err != nil {
 		return err
 	}
 	if invokeErr != nil {
-		return invokeErr
+		return fmt.Errorf("advisor %s: %w", actor, invokeErr)
 	}
 	verdict.Advice = text
 	return nil

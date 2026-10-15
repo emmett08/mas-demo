@@ -237,7 +237,11 @@ See the [Copilot CLI reference](https://docs.github.com/en/copilot/reference/cop
   per live role (one per region). Each invocation allows at most 15 seconds.
   The supplied config caps each response at 1,024 UTF-8 bytes; configuration
   permits at most 2,048. Overflow cancels the process; stderr is separately
-  bounded and never copied to reports/errors.
+  bounded and never copied to reports/errors. Recognised CLI failures expose
+  only a fixed diagnostic code, authored guidance, and process exit status;
+  MAS call evidence retains `failure_code` and `exit_code` with
+  `status: outcome_unknown`. These diagnostics do not authorise a retry or
+  establish whether the provider charged for the call.
 - `max_ai_credits` is forwarded to the pinned CLI. Its minimum is 30 credits,
   and it is a **soft per-session cap**, not a hard spending limit: a response
   can overshoot before usage is observed. Six CLI invocations do not prove
@@ -254,7 +258,10 @@ live config emits 28 messages and records six calls; reports include untrusted
 model-authored `advice`. Do not execute or treat that text as independently
 verified evidence. Real model execution requires your own authorized credential;
 the automated test suite uses local subprocess fixtures for the provider while
-keeping the MAS runtime real.
+keeping the MAS runtime real. Setting `COPILOT_TEST_BIN` to the installed CLI
+also tests its argument parsing and credential rejection with a fabricated
+classic PAT; this does not authenticate or request model inference. CI enables
+this check without exposing live credentials.
 
 ## GitHub Actions demo
 
@@ -277,6 +284,27 @@ its **`COPILOT_GITHUB_TOKEN` environment secret**. Then select **Actions → MAS
 rollout demo → Run workflow**, choose the default branch, enable `live`, and
 select a scenario. Environment protection requires repository-admin setup; YAML
 cannot create those approval rules. Live execution may incur Copilot charges.
+
+The secret under **Secrets and variables → Agents** belongs to the Copilot cloud
+agent. This Actions job reads the secret under **Environments → copilot-demo**.
+A masked, non-empty value in the job log confirms delivery, not authentication.
+
+If the live job fails, use its diagnostic code:
+
+| Code | Next check |
+| --- | --- |
+| `unsupported_credential` | Replace a classic PAT (`ghp_`) with a fine-grained PAT owned by your personal account and granted **Copilot Requests** permission. |
+| `authentication_missing` | Check that the environment secret contains a supported token, without quotes or a placeholder. |
+| `authentication_network` | Check connectivity to GitHub; this result does not establish that the token is invalid. |
+| `authentication_failed` | Check expiry, revocation and **Copilot Requests** permission. |
+| `access_denied` | Check the account's Copilot subscription and organisation policies. |
+| `cli_arguments` / `process_start` | Check the pinned CLI installation, executable, Node.js and invocation. |
+| `process_failed` | The error was not recognised; check model availability and account access. Raw output remains private. |
+
+See [GitHub's authentication troubleshooting guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/troubleshoot-copilot-cli-auth).
+After correcting a credential, rerun the failed job. After merging a code or
+configuration change, start a **new** workflow run on `main`; rerunning an old
+run uses its original commit.
 
 Actions are pinned by commit, checkout credentials are not persisted, and the
 workflow token has only `contents: read`. The Copilot secret is exposed only to
