@@ -128,11 +128,12 @@ test "$COPILOT_HOME" = "$HOME"
 test "$XDG_CONFIG_HOME" = "$HOME"
 test "$TMPDIR" = "$HOME"
 printf '%s\n' "$HOME" > "` + homeRecord + `"
-for required in --available-tools= --deny-tool --disable-builtin-mcps --no-custom-instructions --no-auto-update --no-bash-env --no-remote-export --max-ai-credits; do
+for required in --available-tools= --disable-builtin-mcps --no-custom-instructions --no-auto-update --no-bash-env --no-remote-export --max-ai-credits; do
   found=false
   for arg do
     test "$arg" != --allow-all-tools
     test "$arg" != --allow-all
+    test "$arg" != --deny-tool
     if test "$arg" = "$required"; then found=true; fi
   done
   test "$found" = true

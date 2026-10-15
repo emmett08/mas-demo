@@ -173,7 +173,7 @@ func (a *advisor) invoke(ctx context.Context, agent agentConfig, role string, r 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, a.binary,
 		"--prompt", prompt, "--model", agent.Model, "--silent", "--output-format", "text",
-		"--stream", "off", "--available-tools=", "--deny-tool", "*",
+		"--stream", "off", "--available-tools=",
 		"--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user",
 		"--no-auto-update", "--no-color", "--no-bash-env", "--no-remote-export",
 		"--log-level", "none", "--max-ai-credits", strconv.Itoa(agent.MaxAICredits))
