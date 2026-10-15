@@ -6,16 +6,17 @@ import (
 )
 
 type region struct {
-	Name           string `json:"name"`
-	Current        int    `json:"current_replicas"`
-	Desired        int    `json:"desired_replicas"`
-	Surge          int    `json:"surge_replicas"`
-	FreeSlots      int    `json:"free_pod_slots"`
-	Budget         int    `json:"error_budget_percent"`
-	Telemetry      bool   `json:"telemetry_available"`
-	Signed         bool   `json:"image_signed"`
-	Privileged     bool   `json:"privileged"`
-	PolicyMaxSurge int    `json:"policy_max_surge"`
+	Name           string              `json:"name"`
+	Current        int                 `json:"current_replicas"`
+	Desired        int                 `json:"desired_replicas"`
+	Surge          int                 `json:"surge_replicas"`
+	FreeSlots      int                 `json:"free_pod_slots"`
+	Budget         int                 `json:"error_budget_percent"`
+	Telemetry      bool                `json:"telemetry_available"`
+	Signed         bool                `json:"image_signed"`
+	Privileged     bool                `json:"privileged"`
+	PolicyMaxSurge int                 `json:"policy_max_surge"`
+	Cluster        *clusterObservation `json:"cluster,omitempty"`
 }
 
 type check struct {
@@ -26,9 +27,10 @@ type check struct {
 }
 
 type regionalReport struct {
-	Region string  `json:"region"`
-	State  string  `json:"state"`
-	Checks []check `json:"checks"`
+	Region  string              `json:"region"`
+	State   string              `json:"state"`
+	Checks  []check             `json:"checks"`
+	Cluster *clusterObservation `json:"cluster,omitempty"`
 }
 
 type report struct {
@@ -149,6 +151,13 @@ func evaluate(role string, r region, peer peerEvidence) check {
 		result.State = "unknown"
 		result.Evidence = "unrecognized specialist"
 	}
+	if r.Cluster != nil {
+		result.Evidence += "; " + clusterDescription(r.Cluster)
+		if role == "capacity" && !r.Cluster.RolloutComplete {
+			result.State = "blocked"
+			result.Evidence += "; current deployment rollout is not ready"
+		}
+	}
 	return result
 }
 
@@ -170,7 +179,7 @@ func gate(states []string) string {
 }
 
 func assessRegion(b *bus, r region) (regionalReport, error) {
-	result := regionalReport{Region: r.Name}
+	result := regionalReport{Region: r.Name, Cluster: r.Cluster}
 	roles := []string{"capacity", "reliability", "security"}
 	peerRoles := []string{"reliability", "security", "capacity"}
 	operations := []string{"surge-budget", "image-attestation", "surge-size"}

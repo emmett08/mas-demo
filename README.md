@@ -127,6 +127,8 @@ go -C "$DEMO_DIR" run . -mas-bin "$MAS_BIN" \
 ```
 
 The directory contains `topology.json` and the real `state.sqlite` database.
+It also contains `mailbox.jsonl` (timestamped transition snapshots) and
+`mailbox.md` (a human-readable mailbox/task timeline).
 Status shows the frozen routes, task outcomes, usage, and delivery/acknowledgement
 records. The local `.mas-state` directory and default Go binary are gitignored.
 Existing directories are refused to avoid overwriting or accidentally reusing a
@@ -287,3 +289,120 @@ workflow token has only `contents: read`. The Copilot secret is exposed only to
 the live invocation step, not package installation/build steps or PR runs. Never
 change this to execute untrusted PR code with the live credential. Review
 configuration and workflow changes before merging them to the default branch.
+
+## Optional Kubernetes integration
+
+Manually dispatch **MAS rollout demo** with **`kubernetes=true`** to create a
+disposable single-node k3s cluster through checksum-pinned **k3d 5.9.0**, using
+**k3s v1.37.1-k3s1** and a matching kubectl. The job runs after offline tests;
+normal PR/push checks do not need Docker or a cluster. It does not use the
+Copilot credential. The existing `live` input remains a separate advisory job.
+
+The job creates `mas-east` and `mas-west` namespaces with two replicas of the
+digest-pinned, non-root HTTP Deployment in `k8s/sample.yaml`. These are **logical
+regions sharing one node**, not two failure domains. HTTP readiness probes must
+succeed before assessment.
+
+The Go application's cluster mode runs only **read-only kubectl queries**:
+
+- Node allocatable CPU, memory, and pod slots; node readiness and schedulability.
+- CPU/memory requests and overhead for all nonterminal pods, including Pending
+  demand. Succeeded/Failed pods no longer consume this request budget.
+- Each sample Deployment's replica counts, observed generation, resource
+  requests, declared privilege setting, and rollout readiness.
+
+`cluster-observations.json` retains the inputs. Reports include the observations
+under each region's `cluster` field, alongside each specialist's check evidence.
+The `healthy` proposal requests three replicas in each namespace; the `capacity`
+proposal deliberately requests more replicas than its measured headroom can
+support. Assessments themselves never mutate the workloads, and the workflow
+checks that both Deployments remain at two ready replicas afterward.
+
+### Observed versus synthetic evidence
+
+Resource requests and rollout readiness are observed from the Kubernetes API,
+not model estimates. The estimator subtracts pod requests from allocatable
+resources, converts remaining CPU/memory/pod capacity into sample-sized pod
+slots, and conservatively divides this shared headroom equally between the two
+regions to prevent double-spending it. It reserves one additional surge slot.
+
+This is a bounded **single-node demonstration**, not a scheduler simulator or
+production capacity guarantee. It uses requests, not measured resource
+utilization, and does not model affinity, topology spread, storage, networking,
+extended resources, or eviction pressure. Multiple nodes, tainted/unschedulable/
+unready nodes, unsupported quantities, init containers, missing sample requests,
+and unsupported scale-down proposals fail rather than inventing a capacity
+answer. An incomplete current Deployment rollout blocks readiness.
+
+Error budget remains an explicitly **synthetic 60% demo policy**. Image
+attestation is explicitly **synthetic accepted evidence**, not cryptographic
+verification. Both sources are labeled in the observations and check text.
+Declaring a privileged container is read from the pod template, but this is not
+a complete security assessment. A `proceed` here means only that the documented
+demo predicates passed—not real SLO/signature verification or production approval.
+
+### Separately authorized sample rollout
+
+Provisioning the disposable cluster/baseline is part of `kubernetes=true`.
+Changing the baseline from two to three replicas is a **separate workflow step**
+requiring the additional manual **`deploy=true`** input and dispatch from the
+default branch. It checks that the healthy report says `proceed` and the blocked
+report says `hold`, scales only the healthy sample to the fixed three replicas,
+waits for rollout completion, and verifies ready/updated/available counts.
+The deliberately blocked proposal is never applied. With `deploy=false`,
+the job demonstrates read-only readiness assessment only.
+
+This authorization applies only to the cluster created by that job. No external
+kubeconfig or production credential is needed, and the Go CLI has **no apply,
+scale, or deployment-execution capability**. Copilot text cannot authorize this
+step. Cleanup runs even after failures.
+
+### Local cluster assessment
+
+With the same disposable cluster, matching kubectl, and sample Deployments
+already provisioned, supply the explicit context:
+
+```sh
+go -C "$DEMO_DIR" run . -mas-bin "$MAS_BIN" \
+  -kube-context k3d-mas-demo -cluster-desired 3 \
+  -scenario healthy -timeout 120s
+
+go -C "$DEMO_DIR" run . -mas-bin "$MAS_BIN" \
+  -kube-context k3d-mas-demo -cluster-desired 3 \
+  -scenario capacity -timeout 120s
+```
+
+The current `KUBECONFIG` is used only by kubectl; every query selects the supplied
+context explicitly. `-kubectl-bin` selects an installed client. Cluster mode
+supports only `healthy` and `capacity` and retains the same mixed MAS topology.
+No cluster flags means the original fully offline behavior.
+
+## Watching mailbox changes
+
+Every CLI run writes operation-triggered snapshots to `mailbox.jsonl`, including
+initialization, send, receive, acknowledgement, and result delivery. Snapshots
+use MAS **status**, never additional receive calls, so observation does not
+consume messages or create redelivery flags. MAS status may still reconcile an
+expired deadline, as in ordinary runtime inspection.
+
+Each record includes a UTC timestamp, operation, actor/message identity where
+available, per-recipient pending counts, message routes and received/acknowledged
+flags, and task states. Pending counts include received-but-unacknowledged
+messages. Completed protocol tasks are not necessarily approved readiness checks.
+Full snapshots capture even short-lived queued messages; no polling interval or
+artificial sleep is needed. They exclude payloads, model advice, and credentials.
+
+```sh
+# Set STATE_DIR to the evidence directory printed by a demo invocation.
+jq -c '{time,event,actor,message_id,pending,tasks:.status.tasks}' \
+  "$STATE_DIR/mailbox.jsonl"
+```
+
+`mailbox.md` renders routes, pending totals, and open/completed task counts over
+time. All workflow modes publish these tables to the Actions job summary.
+The Kubernetes job additionally uploads readiness reports, before/after
+Deployment objects, rollout output, node/pod/Deployment/event diagnostics, JSONL
+history, and MAS databases for seven days. Diagnostics and cleanup run on
+failure; **kubeconfig and cluster credentials are excluded from artifacts**.
+Trace I/O failures stop the demo rather than silently presenting incomplete
+evidence, and no automatic retry is attempted after an ambiguous operation.

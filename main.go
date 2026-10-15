@@ -27,6 +27,9 @@ func run() error {
 	agentsPath := flag.String("agents-config", "", "role/provider JSON configuration (default: deterministic)")
 	copilotBinary := flag.String("copilot-bin", "copilot", "path to Copilot CLI 1.0.98")
 	allowLive := flag.Bool("allow-live", false, "explicitly permit configured Copilot calls")
+	kubeContext := flag.String("kube-context", "", "explicit context for read-only single-node Kubernetes demo observations")
+	kubectlBinary := flag.String("kubectl-bin", "kubectl", "path to kubectl")
+	clusterDesired := flag.Int("cluster-desired", 3, "proposed replicas per sample deployment in cluster mode")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
@@ -82,7 +85,25 @@ func run() error {
 	defer stop()
 	ctx, cancel := context.WithTimeout(parent, *timeout)
 	defer cancel()
+	if *kubeContext != "" {
+		regions, err = observeCluster(ctx, *kubectlBinary, *kubeContext, *name, *clusterDesired)
+		if err != nil {
+			return err
+		}
+		observations, err := json.MarshalIndent(regions, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cluster-observations.json"), observations, 0600); err != nil {
+			return err
+		}
+	}
 	b := &bus{ctx: ctx, binary: resolved, database: filepath.Join(dir, "state.sqlite"), advisor: advice}
+	b.trace, err = openTrace(dir)
+	if err != nil {
+		return err
+	}
+	defer b.trace.close()
 	if err := b.command(nil, nil, "init", b.database, "rollout", configPath); err != nil {
 		return err
 	}

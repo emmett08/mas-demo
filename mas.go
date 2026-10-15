@@ -18,6 +18,7 @@ type bus struct {
 	database string
 	next     int
 	advisor  *advisor
+	trace    *protocolTrace
 }
 
 type message struct {
@@ -63,7 +64,19 @@ func (b *bus) execute(stdin io.Reader, output any, args ...string) error {
 		return fmt.Errorf("mas %s rejected: %s (%v)", args[0], envelope.Error.Message, err)
 	}
 	if output != nil {
-		return json.Unmarshal(envelope.Result, output)
+		if err := json.Unmarshal(envelope.Result, output); err != nil {
+			return err
+		}
+	}
+	switch args[0] {
+	case "init":
+		return b.snapshot("init", "", "")
+	case "send":
+		return b.snapshot("send", args[2], "")
+	case "receive":
+		return b.snapshot("receive", args[3], "")
+	case "ack":
+		return b.snapshot("ack", args[4], args[3])
 	}
 	return nil
 }
@@ -136,6 +149,9 @@ func (b *bus) finish(request message, output any) (json.RawMessage, error) {
 	}
 	delivered, err := b.consume(reply)
 	if err != nil {
+		return nil, err
+	}
+	if err := b.snapshot("result-delivered", reply.Recipient, reply.ID); err != nil {
 		return nil, err
 	}
 	return json.Marshal(delivered["output"])
