@@ -74,16 +74,10 @@ errors, expired/incomplete tasks, and timeouts exit nonzero without a decision.
 
 ## Why combine topologies?
 
-```text
-                         release
-                         /     \
-                   east-lead   west-lead       delegation tree
-                     / | \      / | \
-                    C  R  S    C  R  S          regional stars
-                    \--mesh/   \--mesh/         peer review
+![Animated rollout topology and message flow: release delegates to regional leads, leads fan out readiness requests, specialists exchange peer evidence, and regional results return for aggregation.](docs/rollout-topology.gif)
 
-              C = capacity, R = reliability, S = security
-```
+The arrows show bidirectional permission routes; the moving dots show request
+and result traffic through the workflow.
 
 - **Tree:** `release ↔ region-lead ↔ specialists` scopes responsibility. The
   coordinator cannot address specialists directly; regions cannot address one
