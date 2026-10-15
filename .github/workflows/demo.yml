@@ -49,6 +49,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (action runtime: Node 24)
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install pinned Copilot CLI for credential-free compatibility tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/copilot-cli" --no-audit --no-fund @github/copilot@1.0.98
+          echo "COPILOT_TEST_BIN=$RUNNER_TEMP/copilot-cli/node_modules/.bin/copilot" >> "$GITHUB_ENV"
       - name: Build pinned MAS runtime
         run: |
           set -euo pipefail
@@ -119,7 +127,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (action runtime: Node 24)
         with:
           node-version: '22'
           package-manager-cache: false

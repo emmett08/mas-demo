@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,27 +165,42 @@ func TestCopilotFailuresAreBoundedAndSanitized(t *testing.T) {
 	t.Setenv("COPILOT_GITHUB_TOKEN", "test-only-sentinel")
 	config := sampleConfig(t, "copilot")
 	for _, tt := range []struct {
-		name string
-		body string
-		want string
+		name     string
+		body     string
+		want     string
+		code     string
+		exitCode int
 	}{
-		{"failure", `printf '%s' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`, "invocation failed"},
-		{"credential in answer", `printf '%s' "$COPILOT_GITHUB_TOKEN"`, "sensitive output"},
-		{"empty", `printf '  \n'`, "empty"},
-		{"stdout overflow", `while :; do printf '%0100d' 0; done`, "output exceeded budget"},
-		{"stderr overflow", `while :; do printf '%0100d' 0 >&2; done`, "output exceeded budget"},
-		{"timeout", `while :; do :; done`, "timed out"},
+		{"failure", `printf '%s' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`, "invocation failed", "process_failed", 1},
+		{"credential in answer", `printf '%s' "$COPILOT_GITHUB_TOKEN"`, "sensitive output", "invalid_output", -1},
+		{"empty", `printf '  \n'`, "empty", "invalid_output", -1},
+		{"invalid UTF-8", `printf '\377'`, "invalid", "invalid_output", -1},
+		{"stdout overflow", `while :; do printf '%0100d' 0; done`, "output exceeded budget", "output_budget_exceeded", -1},
+		{"stderr overflow", `while :; do printf '%0100d' 0 >&2; done`, "output exceeded budget", "output_budget_exceeded", -1},
+		{"timeout", `while :; do :; done`, "timed out", "invocation_timeout", -1},
+		{"cancelled", `while :; do :; done`, "cancelled", "invocation_cancelled", -1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			a, err := newAdvisor(config, fakeCopilot(t, tt.body), true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			timeout := 5 * time.Second
+			if tt.name == "timeout" {
+				timeout = 100 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			_, err = a.invoke(ctx, config.Roles["capacity"], "capacity", region{}, peerEvidence{}, check{})
+			if tt.name == "cancelled" {
+				cancel()
+			}
+			text, err := a.invoke(ctx, config.Roles["capacity"], "capacity", region{}, peerEvidence{}, check{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "test-only-sentinel") {
 				t.Fatalf("missing or sensitive error: %v", err)
+			}
+			var failure *copilotFailure
+			if text != "" || !errors.As(err, &failure) || failure.Code != tt.code || failure.ExitCode != tt.exitCode {
+				t.Fatalf("failure returned output or lacks structured diagnostics: text=%q error=%v", text, err)
 			}
 		})
 	}
@@ -248,29 +264,60 @@ func TestMASAdvisoryCannotOverrideSafety(t *testing.T) {
 
 func TestMASRecordsProviderFailureWithoutReadinessDecision(t *testing.T) {
 	t.Setenv("COPILOT_GITHUB_TOKEN", "test-only-sentinel")
-	b := testBus(t, 6)
-	var err error
-	b.advisor, err = newAdvisor(sampleConfig(t, "copilot"), fakeCopilot(t, "exit 1"), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	regions, _ := scenario("healthy")
-	got, err := runRollout(b, "healthy", regions)
-	if err == nil || got.Decision != "" {
-		t.Fatalf("provider failure produced decision: %+v %v", got, err)
-	}
-	var status struct {
-		Calls []struct {
-			State    string `json:"state"`
-			Evidence struct {
-				Status string `json:"status"`
-			} `json:"evidence"`
-		} `json:"calls"`
-	}
-	if err := b.command(nil, &status, "status", b.database, "rollout"); err != nil {
-		t.Fatal(err)
-	}
-	if len(status.Calls) != 1 || status.Calls[0].State != "recorded" || status.Calls[0].Evidence.Status != "outcome_unknown" {
-		t.Fatalf("provider failure lacks durable evidence: %+v", status)
+	for _, tt := range []struct {
+		name     string
+		body     string
+		code     string
+		exitCode int
+	}{
+		{"authentication", `printf '%s\n' 'Error: No authentication information found' "$COPILOT_GITHUB_TOKEN" >&2; exit 1`, "authentication_missing", 1},
+		{"stdout overflow", `while :; do printf '%0100d' 0; done`, "output_budget_exceeded", -1},
+		{"stderr overflow", `while :; do printf '%0100d' 0 >&2; done`, "output_budget_exceeded", -1},
+		{"timeout", `while :; do :; done`, "invocation_timeout", -1},
+		{"invalid output", `printf '%s' "$COPILOT_GITHUB_TOKEN"`, "invalid_output", -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := testBus(t, 6)
+			config := sampleConfig(t, "copilot")
+			// Expire the advisor's deadline while leaving the MAS bus alive to
+			// record the failed call. Cancelling the bus would prevent finish.
+			agent := config.Roles["capacity"]
+			agent.TimeoutSeconds = 1
+			config.Roles["capacity"] = agent
+			var err error
+			b.advisor, err = newAdvisor(config, fakeCopilot(t, tt.body), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regions, _ := scenario("healthy")
+			got, err := runRollout(b, "healthy", regions)
+			if err == nil || got.Decision != "" {
+				t.Fatalf("provider failure produced decision: %+v %v", got, err)
+			}
+			if !strings.Contains(err.Error(), "advisor east-capacity:") || strings.Contains(err.Error(), "test-only-sentinel") {
+				t.Fatalf("provider failure lacks safe actor context: %v", err)
+			}
+			var status struct {
+				Calls []struct {
+					State    string `json:"state"`
+					Evidence struct {
+						Status      string `json:"status"`
+						FailureCode string `json:"failure_code"`
+						ExitCode    int    `json:"exit_code"`
+						OutputBytes int    `json:"output_bytes"`
+					} `json:"evidence"`
+				} `json:"calls"`
+			}
+			if err := b.command(nil, &status, "status", b.database, "rollout"); err != nil {
+				t.Fatal(err)
+			}
+			if len(status.Calls) != 1 || status.Calls[0].State != "recorded" || status.Calls[0].Evidence.Status != "outcome_unknown" {
+				t.Fatalf("provider failure lacks durable evidence: %+v", status)
+			}
+			evidence := status.Calls[0].Evidence
+			if evidence.FailureCode != tt.code || evidence.ExitCode != tt.exitCode || evidence.OutputBytes != 0 {
+				t.Fatalf("provider failure lacks safe diagnostics: %+v", status)
+			}
+		})
 	}
 }
