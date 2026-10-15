@@ -180,8 +180,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.kubernetes
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      KUBECONFIG: ${{ runner.temp }}/mas-kubeconfig
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -193,6 +191,7 @@ jobs:
       - name: Install pinned cluster tools and build MAS
         run: |
           set -euo pipefail
+          echo "KUBECONFIG=$RUNNER_TEMP/mas-kubeconfig" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/mas-kubernetes-reports"
           curl --fail --location --retry 3 \
             https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 \

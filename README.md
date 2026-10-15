@@ -406,3 +406,10 @@ history, and MAS databases for seven days. Diagnostics and cleanup run on
 failure; **kubeconfig and cluster credentials are excluded from artifacts**.
 Trace I/O failures stop the demo rather than silently presenting incomplete
 evidence, and no automatic retry is attempted after an ambiguous operation.
+
+Some nested/containerized development environments can start k3s but cannot
+configure the kernel networking needed for pod readiness probes. In that case,
+even system pods may stay unready: the workflow fails its baseline rollout wait,
+and direct Go assessments return `hold` for unready Deployments. Do not disable
+readiness checks or substitute synthetic readiness to make that environment pass;
+run the optional job on its intended Docker-capable hosted runner.
